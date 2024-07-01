@@ -49,8 +49,8 @@ async function replicateSearchIndexes() {
                         console.log(`[${new Date().toISOString()}] Attempting to create the index in the collection ${collectionName.name}:\n${JSON.stringify(indexNew)}`);
                         try{
                                 const status = await collectionTarget.createSearchIndex(indexNew);
-                                console.log(`[${new Date().toISOString()}] Successfully created the index ${indexNew.name} in the target collection ${collectionTarget}. Waiting for 1 minute for index build to proceed`);
-                                await new Promise(resolve => setTimeout(resolve, 60000));
+                                console.log(`[${new Date().toISOString()}] Successfully created the index ${indexNew.name} in the target collection ${collectionTarget}. Waiting for 2 minute for index build to proceed`);
+                                await new Promise(resolve => setTimeout(resolve, 120000));
                         }
                         catch (error) {
                                 console.error(`[${new Date().toISOString()}] ${error}`);
