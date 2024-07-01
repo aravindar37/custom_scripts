@@ -1,3 +1,5 @@
+**Migrate Search Indexes**
+
 This script is for migrating Search indexes from one MongoDB Atlas cluster to another. 
 
 When performing a Live Migration, MongoDB Atlas does not copy the search indexes. Follow the below steps to copy the search indexes.
