@@ -6,13 +6,10 @@ const { type } = require("os");
 async function replicateSearchIndexes() {
 
 //    const atlasAdminUrl = `{{base_url}}/api/atlas/{{version}}/groups/{{ProjectID}}/clusters/{{CLUSTER-NAME}}/fts/indexes`;
-    const baseURLSource = "mongodb+srv://aravindar:aravindar@prod.gmuxd.mongodb.net/?retryWrites=true&w=majority&appName=Prod";
-    const baseURLTarget = "mongodb+srv://aravindar:aravindar@cluster1.gmuxd.mongodb.net/?retryWrites=true&w=majority&appName=Prod";
+    const baseURLSource = "mongodb+srv://<user>:<password>@sourcecluster.<projectid>.mongodb.net/?retryWrites=true&w=majority&appName=searchMigrator";
+    const baseURLTarget = "mongodb+srv://<user>:<password>@targetcluster.<projectid>.mongodb.net/?retryWrites=true&w=majority&appName=searchMigrator";
 
-    const clientSource = await MongoClient.connect(baseURLSource, {
-        useNewUrlParser: true,
-        useUnifiedTopology: true,
-    });
+    const clientSource = await MongoClient.connect(baseURLSource);
 
     const clientTarget = await MongoClient.connect(baseURLTarget);
 
@@ -29,20 +26,20 @@ async function replicateSearchIndexes() {
         }
 
         // Switch to the current database
-        const currentDb_source = clientSource.db(database.name);
-        const currentDb_target = clientTarget.db(database.name);
+        const currentDbSource = clientSource.db(database.name);
+        const currentDbTarget = clientTarget.db(database.name);
 
         // Get the collection names
-        const collectionNames = await currentDb_source.listCollections().toArray();
+        const collectionNames = await currentDbSource.listCollections().toArray();
 
         // Iterate through each collection and list the search indexes
         for (const collectionName of collectionNames) {
 
-            collectionSource = currentDb_source.collection(collectionName.name)
+            collectionSource = currentDbSource.collection(collectionName.name)
             const searchIndexes = await collectionSource.listSearchIndexes().toArray();
 
             if (searchIndexes.length > 0) {
-                const collectionTarget = currentDb_target.collection(collectionName.name)
+                const collectionTarget = currentDbTarget.collection(collectionName.name)
                 for (const index of searchIndexes) {
                         const indexNew = {
                                 name: index.name,
