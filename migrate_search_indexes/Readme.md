@@ -15,5 +15,7 @@ Step 4: Perform Live migration of data to the new cluster from the old cluster. 
 Step 5: Replicate the search indexes from the source cluster to the new cluster.
 
 Run the below script once the live migration status shows ‘Initial Sync Complete’
+
 execute 'npm install'
+
 execute 'node replicateSearchIndexes.js'
