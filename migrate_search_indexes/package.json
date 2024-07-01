@@ -1,0 +1,15 @@
+{
+  "name": "replicateSearchIndexes",
+  "version": "1.0.0",
+  "description": "replicate Atlas Search Index from one cluster to another",
+  "main": "test.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "dependencies": {
+    "axios": "^0.27.2",
+    "mongodb": "^6.8.0"
+  },
+  "author": "aravind.ar",
+  "license": "ISC"
+}
