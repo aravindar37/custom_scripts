@@ -1,0 +1,259 @@
+# =================================================================================================
+- name: "Play 1 || Initialize the servers"
+  hosts: all
+  gather_facts: no
+  any_errors_fatal: true
+  become: yes
+
+  tasks:
+    - name: Wait for SSH access
+      ansible.builtin.wait_for:
+        host: '{{ ansible_host }}'
+        search_regex: OpenSSH
+        port: 22
+      vars:
+        ansible_connection: ssh
+      become: no
+    
+    - name: "update apt-get"
+      apt:
+        upgrade: yes
+        update_cache: yes
+
+    - name: Set hostname to the value from inventory
+      ansible.builtin.hostname:
+        name: "{{ inventory_hostname }}"
+
+    - name: Populate /etc/hosts file
+      template:
+        src: hosts_template.j2
+        dest: /etc/hosts
+
+    - name: Disable swap for current session
+      command: swapoff -a
+      become: true
+
+    - name: Disable swap permanently, persist reboots
+      replace:
+        path: /etc/fstab
+        regexp: '^(\s*)([^#\n]+\s+)(\w+\s+)swap(\s+.*)$'
+        replace: '#\1\2\3swap\4'
+        backup: yes
+
+# =================================================================================================
+- name: "Play 2 || Install the container run time (containerd)"
+  hosts: all
+  any_errors_fatal: true
+  become: yes
+
+  tasks:
+    - name: Download containerd tarball
+      get_url:
+        url: https://github.com/containerd/containerd/releases/download/v1.7.1/containerd-1.7.1-linux-amd64.tar.gz
+        dest: /tmp/containerd-1.7.1-linux-amd64.tar.gz
+
+    - name: Extract containerd tarball
+      unarchive:
+        src: /tmp/containerd-1.7.1-linux-amd64.tar.gz
+        dest: /usr/local/bin
+        remote_src: yes
+        extra_opts: ['--strip-components=1']
+
+    - name: Download containerd service file
+      get_url:
+        url: https://raw.githubusercontent.com/containerd/containerd/main/containerd.service
+        dest: /usr/local/containerd.service
+
+    - name: Move containerd service file to systemd directory
+      copy:
+        src: /usr/local/containerd.service
+        dest: /etc/systemd/system/containerd.service
+        remote_src: yes
+
+    - name: Reload systemd daemon
+      systemd:
+        daemon_reload: yes
+
+    - name: Enable and start containerd service
+      systemd:
+        name: containerd
+        enabled: yes
+        state: started
+
+# =================================================================================================
+- name: "Play 3 || Install runc"
+  hosts: all
+  any_errors_fatal: true
+  become: yes
+
+  tasks:
+    - name: Download runc binary
+      get_url:
+        url: https://github.com/opencontainers/runc/releases/download/v1.1.7/runc.amd64
+        dest: /home/ubuntu/runc.amd64
+
+    - name: Install runc binary
+      command: install -m 755 /home/ubuntu/runc.amd64 /usr/local/sbin/runc
+
+# =================================================================================================
+- name: "Play 4 || Install CNI plugins"
+  hosts: all
+  any_errors_fatal: true
+  become: yes
+
+  tasks:
+    - name: Download CNI plugins archive
+      get_url:
+        url: https://github.com/containernetworking/plugins/releases/download/v1.3.0/cni-plugins-linux-amd64-v1.3.0.tgz
+        dest: /home/ubuntu/cni-plugins-linux-amd64-v1.3.0.tgz
+
+    - name: Create /opt/cni/bin directory
+      file:
+        path: /opt/cni/bin
+        state: directory
+
+    - name: Extract CNI plugins archive
+      unarchive:
+        src: /home/ubuntu/cni-plugins-linux-amd64-v1.3.0.tgz
+        dest: /opt/cni/bin
+        remote_src: yes
+        extra_opts: ['--strip-components=1']
+
+# =================================================================================================
+- name: "Play 5 || Install crictl"
+  hosts: all
+  any_errors_fatal: true
+  become: yes
+
+  vars:
+    version: "v1.27.0"
+
+  tasks:
+    - name: Download crictl
+      get_url:
+        url: "https://github.com/kubernetes-sigs/cri-tools/releases/download/{{ version }}/crictl-{{ version }}-linux-amd64.tar.gz"
+        dest: "/home/ubuntu/crictl-{{ version }}-linux-amd64.tar.gz"
+
+    - name: Extract crictl
+      unarchive:
+        src: "/home/ubuntu/crictl-{{ version }}-linux-amd64.tar.gz"
+        dest: "/usr/local/bin"
+        remote_src: yes
+        extra_opts: ['--strip-components=1']
+
+    - name: Remove downloaded tarball
+      file:
+        path: "/home/ubuntu/crictl-{{ version }}-linux-amd64.tar.gz"
+        state: absent
+
+    - name: Create crictl configuration file
+      copy:
+        content: |
+          runtime-endpoint: unix:///var/run/containerd/containerd.sock
+          image-endpoint: unix:///var/run/containerd/containerd.sock
+          timeout: 2
+          debug: false
+          pull-image-on-create: false
+        dest: /etc/crictl.yaml
+
+# =================================================================================================
+- name: "Play 6 || Configure Prerequisites - Forwarding IPv4 and letting iptables see bridged traffic"
+  hosts: all
+  any_errors_fatal: true
+  become: yes
+
+  tasks:
+    - name: Create k8s.conf file for modules
+      copy:
+        content: |
+          overlay
+          br_netfilter
+        dest: /etc/modules-load.d/k8s.conf
+
+    - name: Load overlay kernel module
+      ansible.builtin.modprobe:
+        name: overlay
+
+    - name: Load br_netfilter kernel module
+      ansible.builtin.modprobe:
+        name: br_netfilter
+
+    - name: Set sysctl parameters
+      copy:
+        content: |
+          net.bridge.bridge-nf-call-iptables = 1
+          net.bridge.bridge-nf-call-ip6tables = 1
+          net.ipv4.ip_forward = 1
+        dest: /etc/sysctl.d/k8s.conf
+
+    - name: Apply sysctl params
+      command: sysctl --system
+
+# =================================================================================================
+- name: "Play 7 || Install kuberadm, kubectl and kubelet"
+  hosts: all
+  any_errors_fatal: true
+  become: yes
+
+  tasks:
+    - name: Update apt cache
+      ansible.builtin.apt:
+        update_cache: yes
+
+    - name: Install required packages
+      ansible.builtin.apt:
+        name: "{{ item }}"
+        state: present
+      loop:
+        - apt-transport-https
+        - ca-certificates
+        - curl
+
+    - name: Create directory for the keyring
+      ansible.builtin.file:
+        path: /etc/apt/keyrings
+        state: directory
+
+    - name: Download and save GPG key to kubernetes-archive-keyring.gpg
+      ansible.builtin.shell: |
+        curl -fsSL https://packages.cloud.google.com/apt/doc/apt-key.gpg | gpg --dearmor -o /etc/apt/keyrings/kubernetes-archive-keyring.gpg
+
+    - name: Add Kubernetes apt repository entry
+      ansible.builtin.lineinfile:
+        path: /etc/apt/sources.list.d/kubernetes.list
+        line: "deb [signed-by=/etc/apt/keyrings/kubernetes-archive-keyring.gpg] https://apt.kubernetes.io/ kubernetes-xenial main"
+        create: yes
+
+    - name: Update apt package index
+      ansible.builtin.apt:
+        update_cache: yes
+
+    - name: Install kubelet, kubeadm, kubectl
+      ansible.builtin.apt:
+        name: "{{ item }}"
+        state: present
+      loop:
+        - kubelet
+        - kubeadm
+        - kubectl
+
+    - name: Hold kubelet, kubeadm, kubectl versions
+      ansible.builtin.command: apt-mark hold kubelet kubeadm kubectl
+# =================================================================================================
+- name: "Play 8 || - Configure Master node"
+  hosts: master
+  any_errors_fatal: true
+  become: yes
+
+  tasks:
+    - name: Check if Kubernetes control-plane is already initialized
+      stat:
+        path: /home/ubuntu/manifests
+      register: k8s_initialized
+
+    - name: Initialize Kubernetes control-plane node
+      command: kubeadm config images pull
+      args:
+        creates: /home/ubuntu/manifests
+      when: k8s_initialized.stat.exists == False
+    

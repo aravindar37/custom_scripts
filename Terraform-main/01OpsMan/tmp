@@ -1,0 +1,64 @@
+## Removed - run ansible with instance resource provisioner  
+  # provisioner "remote-exec" {
+  #   inline = ["echo 'wait until ssh is ready'"]
+
+  #   connection {
+  #     type = "ssh"
+  #     user = "ubuntu"
+  #     private_key = file(var.private-key-file)
+  #     host = self.public_ip
+  #   }
+  # }
+
+  # provisioner "local-exec" {
+  #   command = "ANSIBLE_HOST_KEY_CHECKING=False ansible-playbook -u ubuntu -i '${self.public_ip},' --private-key ${var.private-key-file} ./ansible_templates/installPackage.yml"
+  # } 
+
+# REMOVED - CREATE A CA SERVER
+# - name: "Play 2 || - Create CA server"
+#   hosts: localhost
+#   any_errors_fatal: true
+
+#   tasks:
+#     - name: Create private key with password protection
+#       community.crypto.openssl_privatekey:
+#         path: ./files/tls/ca-certificate.key
+
+#     - name: Create certificate signing request (CSR) for CA certificate
+#       community.crypto.openssl_csr_pipe:
+#         privatekey_path: ./files/tls/ca-certificate.key
+#         common_name: Ansible CA
+#         use_common_name_for_san: false  # since we do not specify SANs, don't use CN as a SAN
+#         basic_constraints:
+#           - 'CA:TRUE'
+#         basic_constraints_critical: true
+#         key_usage:
+#           - keyCertSign
+#         key_usage_critical: true
+#       register: ca_csr
+
+#     - name: Create self-signed CA certificate from CSR
+#       community.crypto.x509_certificate:
+#         path: ./files/tls/ca-certificate.pem
+#         csr_content: "{{ ca_csr.csr }}"
+#         privatekey_path: ./files/tls/ca-certificate.key
+#         provider: selfsigned
+
+# ----------------------------------------------------------------
+# openssl version -a | grep OPENSSLDIR
+
+# ----------------------------------------------------------------
+
+    # - name: "Copy mongod.conf file"
+    #   copy: 
+    #     src: appDB/mongod.conf 
+    #     dest: /etc/mongod.conf
+    #     mode: '0644'
+
+    # - name: "Copy mongodb.key file"
+    #   copy: 
+    #     src: appDB/mongodb.key 
+    #     dest: /etc/mongodb.key
+    #     mode: '0400'
+    #     owner: mongodb
+    #     group: mongodb

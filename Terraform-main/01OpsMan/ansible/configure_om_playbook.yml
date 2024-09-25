@@ -1,0 +1,534 @@
+# =================================================================================================
+- name: "Play 1 || - Initialize the servers"
+  hosts: all
+  any_errors_fatal: true
+  become: yes
+
+  tasks:
+    - name: Wait for SSH access
+      ansible.builtin.wait_for:
+        host: '{{ ansible_host }}'
+        search_regex: OpenSSH
+        port: 22
+      vars:
+        ansible_connection: local
+      become: no
+    
+    - name: "update apt-get"
+      apt:
+        upgrade: yes
+        update_cache: yes
+    
+    - name: Set the hostname
+      ansible.builtin.hostname:
+        name: "{{ hostname }}"
+      when: "inventory_hostname != 'omlb'"
+
+# =================================================================================================
+- name: "Play 2 || - Initialize the Load Balancer node"
+  hosts: om_lb_servers
+  any_errors_fatal: true
+  become: yes
+
+  tasks:
+    - name: Install nginx on Load Balancer 
+      apt:
+        name: "{{ item }}"
+        state: present
+        update_cache: yes
+      with_items:
+        - nginx
+        - libnginx-mod-stream
+        - openssl
+    
+    - name: Set the hostname to public DNS name
+      ansible.builtin.hostname:
+        name: "{{ ansible_host }}"
+
+    - name: update sysctl.conf with net.ipv4.ip_nonlocal_bind 
+      ansible.posix.sysctl:
+        name: "{{ item.name }}"
+        value: "{{ item.value }}"
+        state: present
+      with_items:
+        - { name: 'net.ipv4.ip_nonlocal_bind', value: '1' }
+
+# =================================================================================================
+- name: "Play 3 || - Create CA and Certificates on the LB node"
+  hosts: all
+  any_errors_fatal: true
+  become: yes
+  tasks:
+    - name: "Create /opt/mongodb/pki directory if it does not exist"
+      ansible.builtin.file:
+        path: /opt/mongodb/pki
+        state: directory
+        owner: root
+        group: root
+        mode: '0755'
+
+    - name: Copy CA certificate to LB node
+      ansible.builtin.copy:
+        src: tls/ca.cert
+        dest: "/opt/mongodb/pki/ca.cert"
+        owner: root
+        group: root
+        mode: "0644"
+
+    - name: Copy CA keyfile to LB node
+      ansible.builtin.copy:
+        src: tls/ca.key
+        dest: "/opt/mongodb/pki/ca.key"
+        owner: root
+        group: root
+        mode: "444"
+      register: ca_key
+
+    - name: Generate Private key for each of the OM nodes
+      community.crypto.openssl_privatekey:
+        path: /opt/mongodb/pki/{{ item }}.key
+        type: "RSA"
+        size: 4096
+        state: present
+        owner: root
+        group: root
+      with_items:
+        - "{{hostvars.om0.hostname}}"
+        - "{{hostvars.om1.hostname}}"
+        - "{{hostvars.om2.hostname}}"
+      when: "inventory_hostname == 'omlb'"
+
+    - name: Generate CSR for each of the OM nodes, including the LB node in the SAN
+      community.crypto.openssl_csr:
+        path: /opt/mongodb/pki/{{ item }}.csr
+        privatekey_path: /opt/mongodb/pki/{{ item }}.key
+        common_name: "{{ item }}"
+        country_name: US
+        state_or_province_name: NY
+        locality_name: NY
+        organization_name: MongoDB Inc.
+        organizational_unit_name: Professional Services
+        email_address: om.admin@mongo.db
+        subject_alt_name: "DNS:{{ item }},DNS:{{ hostvars.omlb.ansible_host}}"
+      with_items:
+        - "{{hostvars.om0.hostname}}"
+        - "{{hostvars.om1.hostname}}"
+        - "{{hostvars.om2.hostname}}"
+      when: "inventory_hostname == 'omlb'"
+
+    - name: Get the Signed certificate from the CA
+      community.crypto.x509_certificate:
+        path: /opt/mongodb/pki/{{ item }}.cert
+        csr_path: /opt/mongodb/pki/{{ item }}.csr
+        provider: ownca
+        ownca_path: /opt/mongodb/pki/ca.cert
+        ownca_privatekey_path: /opt/mongodb/pki/ca.key
+        owner: root
+        group: root
+        mode: 0644
+      with_items:
+        - "{{hostvars.om0.hostname}}"
+        - "{{hostvars.om1.hostname}}"
+        - "{{hostvars.om2.hostname}}"
+      when: "inventory_hostname == 'omlb'"
+    
+    - name: Create pem file for each of the nodes
+      ansible.builtin.shell: |
+        touch {{item}}.pem
+        cat {{item}}.key {{item}}.cert > {{item}}.pem
+      args:
+        chdir: /opt/mongodb/pki
+        creates: "{{item}}.pem"
+      with_items:
+        - "{{hostvars.om0.hostname}}"
+        - "{{hostvars.om1.hostname}}"
+        - "{{hostvars.om2.hostname}}"
+      when: "inventory_hostname == 'omlb'"
+
+# =================================================================================================
+- name: "Play 4 || - Copy the signed certificates to respective OM nodes"
+  hosts: all
+  any_errors_fatal: true
+  become: yes
+  tasks:
+    - name: Fetch the hostname.pem file from the LB node to ansible master
+      fetch: 
+        src: /opt/mongodb/pki/{{ item }}.pem
+        dest: files/tls/
+        flat: yes
+      with_items:
+        - "{{hostvars.om0.hostname}}"
+        - "{{hostvars.om1.hostname}}"
+        - "{{hostvars.om2.hostname}}"
+      when: "inventory_hostname == 'omlb'"
+
+    - name: Copy the file from ansible master to other nodes
+      copy: 
+        src: tls/{{hostvars.om0.hostname}}.pem 
+        dest: /opt/mongodb/pki/
+      when: "inventory_hostname == 'om0'"
+    - name: Copy the file from ansible master to other nodes
+      copy: 
+        src: tls/{{hostvars.om1.hostname}}.pem 
+        dest: /opt/mongodb/pki/
+      when: "inventory_hostname == 'om1'"
+    - name: Copy the file from ansible master to other nodes
+      copy: 
+        src: tls/{{hostvars.om2.hostname}}.pem 
+        dest: /opt/mongodb/pki/
+      when: "inventory_hostname == 'om2'"
+
+# =================================================================================================
+- name: "Play 5 || - Run prod notes on Ops Man Servers"
+  hosts: om_servers
+  any_errors_fatal: true
+  become: yes
+
+  tasks:
+    - name: Create xfs filesystem on /dev/nvme1n1
+      community.general.filesystem:
+        fstype: xfs
+        state: present
+        dev: /dev/nvme1n1
+      
+    - name: Create xfs filesystem on /dev/nvme2n1
+      community.general.filesystem:
+        fstype: xfs
+        state: present
+        dev: /dev/nvme2n1
+
+    - name: Mount /dev/nvme1n1 to /data
+      ansible.posix.mount:
+        state: mounted
+        path: /data
+        src: /dev/nvme1n1
+        fstype: xfs
+        opts: noatime
+
+    - name: Mount /dev/nvme2n1 to /backup
+      ansible.posix.mount:
+        state: mounted
+        path: /backup
+        src: /dev/nvme2n1
+        fstype: xfs
+        opts: noatime
+
+    - name: update sysctl.conf with vm.swappiness and vm.zone_reclaim_mode
+      ansible.posix.sysctl:
+        name: "{{ item.name }}"
+        value: "{{ item.value }}"
+        state: present
+      with_items:
+        - { name: 'vm.swappiness', value: '1' }
+        - { name: 'vm.zone_reclaim_mode', value: '0' }
+
+    - name: Set correct ulimits
+      community.general.pam_limits:
+        domain: "mongodb"
+        limit_type: "{{ item.type }}"
+        limit_item: "{{ item.parameter }}"
+        value: "{{ item.value }}"
+      with_items:
+        - { type: 'hard', parameter: 'fsize', value: 'unlimited' }
+        - { type: 'soft', parameter: 'fsize', value: 'unlimited' }
+        - { type: 'hard', parameter: 'cpu', value: 'unlimited' }
+        - { type: 'soft', parameter: 'cpu', value: 'unlimited' }
+        - { type: 'hard', parameter: 'as', value: 'unlimited' }
+        - { type: 'soft', parameter: 'as', value: 'unlimited' }
+        - { type: 'hard', parameter: 'memlock', value: 'unlimited' }
+        - { type: 'soft', parameter: 'memlock', value: 'unlimited' }
+        - { type: 'hard', parameter: 'nofile', value: '64000' }
+        - { type: 'soft', parameter: 'nofile', value: '64000' }
+        - { type: 'hard', parameter: 'nproc', value: '64000' }
+        - { type: 'soft', parameter: 'nproc', value: '64000' }
+    
+    - name: "run script to disable hugepages"
+      script:
+        cmd: disable_hugepage.sh
+    
+    - name: Check if reboot_required
+      shell:
+        cmd: "grep 'mongodb-mms.*No services found$' /var/log/syslog"
+      changed_when: false
+      failed_when: reboot_required.rc != 0 and reboot_required.rc != 1
+      check_mode: false
+      register: reboot_required
+    
+    # - name: Report reboot_required
+    #   debug:
+    #     msg: "{{ reboot_required }}"
+    #   changed_when: reboot_required.rc == 1
+    #   check_mode: false
+
+    - name: reboot the machines
+      ansible.builtin.reboot:
+      changed_when: reboot_required.rc == 1
+      check_mode: false
+
+# =================================================================================================
+- name: "Play 6 || - Install mongodb and start servers on Ops Man Servers"
+  hosts: om_servers
+  become: yes
+  
+  tasks:
+    - name: Ensure group mongodb exists
+      ansible.builtin.group:
+        name: mongodb
+        state: present
+
+    - name: Ensure user mongodb exists
+      ansible.builtin.user:
+        name: mongodb
+        group: mongodb
+
+    - name: "Set owner of dbpath: /data/appdb, logpath: /data/logs and pidFilePath: /data/run/mongodb"
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: directory
+        owner: mongodb
+        group: mongodb
+      with_items:
+        - "/data/appdb"
+        - "/data/logs"
+
+        - "/data/run/mongodb"
+    
+    - name: Import MongoDB public GPG key 5.0
+      apt_key:
+        url: https://pgp.mongodb.com/server-5.0.asc 
+        keyring: /usr/share/keyrings/mongodb-server-5.0.gpg  
+        state: present
+      
+    # - name: Import MongoDB public GPG key
+    #   apt_key:
+    #     url: https://pgp.mongodb.com/server-6.0.asc
+    #     keyring: /usr/share/keyrings/mongodb-server-6.0.gpg 
+    #     state: present
+
+    - name: Add MongoDB list file
+      apt_repository:
+        repo: "deb [ arch=amd64,arm64 signed-by=/usr/share/keyrings/mongodb-server-5.0.gpg ] https://repo.mongodb.com/apt/ubuntu focal/mongodb-enterprise/5.0 multiverse" 
+        state: present
+        filename: /etc/apt/sources.list.d/mongodb-enterprise-5.0.list
+        update_cache: yes
+
+    # - name: Add MongoDB list file
+    #   apt_repository:
+    #     repo: "deb [ arch=amd64,arm64 signed-by=/usr/share/keyrings/mongodb-server-6.0.gpg ] https://repo.mongodb.com/apt/ubuntu jammy/mongodb-enterprise/6.0 multiverse" 
+    #     state: present
+    #     filename: /etc/apt/sources.list.d/mongodb-enterprise-6.0.list
+    #     update_cache: yes
+
+    - name: Install MongoDB Enterprise
+      apt:
+        name: mongodb-enterprise
+        state: present
+        update_cache: yes
+
+    - name: "Copy mongod.conf file"
+      copy: 
+        src: appDB/mongod.conf 
+        dest: /etc/mongod.conf
+        mode: '0644'
+
+    - name: "Copy mongodb.key file"
+      copy: 
+        src: appDB/mongodb.key 
+        dest: /etc/mongodb.key
+        mode: '0400'
+        owner: mongodb
+        group: mongodb
+
+    - name: "Start mongod service"
+      ansible.builtin.service: 
+        name: mongod
+        state: restarted
+        enabled: yes
+
+# =================================================================================================
+- name: "Play 7 || - Initialize AppDB Replica set"
+  hosts: om0 
+  become: yes
+  tasks:
+    - name: Install python3-pip | required for ansible MongoDB RS module
+      apt:
+        name: python3-pip
+        state: present
+
+    - name: Install pymongo | required for ansible MongoDB RS module
+      ansible.builtin.pip:
+        name: pymongo
+
+    - name: Ensure replicaset appdbRS exists 
+      community.mongodb.mongodb_replicaset:
+        replica_set: appdbRS
+        debug: true
+        members:
+          - "{{appdb_rs_primary}}:27017"
+          - "{{appdb_rs_secondary1}}:27017"
+          - "{{appdb_rs_secondary2}}:27017"
+
+    # - name: "Pause for 20 seconds to allow for the replicaset appdbRS to converge"
+    #   ansible.builtin.pause:
+    #     seconds: 20
+    
+    - name: Add initial admin user
+      block:
+      - name: create user
+        community.mongodb.mongodb_user:
+          name: mongoadmin
+          password: passwordone
+          roles: 
+            - { role: "root", db: "admin" }
+          database: admin
+          state: present
+          create_for_localhost_exception: /data/createdUserAlready
+        retries: 10
+        delay: 20
+        register: create_user
+        until: create_user is not failed
+
+# =================================================================================================
+- name: "Play 8 || - Update appDB mongod.conf for TLS and x509 certificates for internal authentication"
+  hosts: om_servers
+  become: yes
+  tasks:
+    - name: "Recreate the mongod.conf file"
+      ansible.builtin.template:
+        src: appDB/mongod.conf.j2
+        dest: /etc/mongod.conf
+        mode: 0644
+
+    - name: "Start mongod service"
+      ansible.builtin.service: 
+        name: mongod
+        state: restarted
+
+# =================================================================================================
+- name: "Play 9 || - Configure Ops Manager servers"
+  hosts: om_servers
+  become: yes
+
+  tasks:
+    - name: Ensure group mongodb-mms exists
+      ansible.builtin.group:
+        name: mongodb-mms
+        state: present
+
+    - name: Ensure user mongodb-mms exists
+      ansible.builtin.user:
+        name: mongodb-mms
+        group: mongodb-mms
+
+    - name: Create MMS directories
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: directory
+        owner: mongodb-mms
+        group: mongodb-mms
+        mode: "0770"
+      loop:
+        - /opt/mongodb
+        - /opt/mongodb/pki
+
+# =================================================================================================
+- name: "Play 10 || - Install and Start Ops Manager Application on OM App Servers"
+  hosts: om0, om1
+  become: yes
+
+  tasks:
+    - name: "download  and install the Ops Manager rpm"
+      ansible.builtin.apt:
+        deb: "{{ opsman_deb }}"
+
+    - name: Recursively change ownership of /opt/mongodb directory
+      ansible.builtin.file:
+        path: /opt/mongodb
+        state: directory
+        recurse: yes
+        mode: a+rx
+    
+    - name: mms config file
+      vars:
+        connection_string: 'mongodb://mongoadmin:passwordone@{{ appdb_rs_primary }}:27017,{{ appdb_rs_secondary1 }}:27017,{{ appdb_rs_secondary2 }}:27017'
+      ansible.builtin.template:
+        src: om/conf-mms.properties.j2
+        dest: /opt/mongodb/mms/conf/conf-mms.properties
+        mode: 0600
+        owner: mongodb-mms
+        group: mongodb-mms
+
+    - name: "Start mongodb-mms service on first node"
+      ansible.builtin.service: 
+        name: mongodb-mms
+        state: started
+        enabled: yes
+      when: "inventory_hostname == 'om0'"
+
+    - name: Wait until the mongodb-mms service has started completely on the first node before continuing
+      wait_for:
+        path: /var/log/syslog
+        search_regex: "mongodb-mms.*No services found$"
+      when: "inventory_hostname == 'om0'"
+
+    - name: "Create /etc/mongodb-mms directory if it does not exist on second node"
+      ansible.builtin.file:
+        path: /etc/mongodb-mms
+        state: directory
+        mode: '0755'
+      when: "inventory_hostname == 'om1'"
+
+    - name: Fetch the gen.key file from the first node to ansible master
+      run_once: yes
+      fetch: 
+        src: /etc/mongodb-mms/gen.key 
+        dest: files/om/
+        flat: yes
+      when: "inventory_hostname == 'om0'"
+
+    - name: Copy the file from ansible master to second node
+      copy: 
+        src: om/gen.key 
+        dest: /etc/mongodb-mms/
+      when: "inventory_hostname == 'om1'"
+
+    - name: set correct permissions for the gen.key file on second node
+      ansible.builtin.file:
+        path: /etc/mongodb-mms/gen.key
+        state: file
+        mode: '0500'
+        owner: mongodb-mms
+        group: mongodb-mms
+      when: "inventory_hostname == 'om1'"
+
+    - name: "Start Ops Manager on Second node"
+      ansible.builtin.service: 
+        name: mongodb-mms
+        state: started
+        enabled: yes
+      when: "inventory_hostname == 'om1'"
+    
+    - name: Wait until the mongodb-mms service has started completely on the second node before continuing
+      wait_for:
+        path: /var/log/syslog
+        search_regex: "mongodb-mms.*No services found$"
+      when: "inventory_hostname == 'om1'"
+
+# =================================================================================================
+- name: "Play 11 || - Configure the Load Balancer node"
+  hosts: om_lb_servers
+  any_errors_fatal: true
+  become: yes
+
+  tasks:
+    - name: Copy the nginx config file (Layer 4 LB)
+      ansible.builtin.template:
+        src: lb/nginx.conf.j2
+        dest: /etc/nginx/nginx.conf
+        mode: 0644
+        backup: yes
+    
+    - name: Restart service nginx
+      ansible.builtin.service:
+        name: nginx
+        state: restarted

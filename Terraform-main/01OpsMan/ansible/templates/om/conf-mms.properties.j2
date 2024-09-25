@@ -1,0 +1,26 @@
+mms.ignoreInitialUiSetup=true
+mms.centralUrl=https://{{ hostname }}:8443
+
+# smtp
+mms.adminEmailAddr=admin.ops@mongo.db
+mms.fromEmailAddr=admin.ops@mongo.db
+mms.replyToEmailAddr=admin.ops@mongo.db
+mms.mail.hostname=localhost
+mms.mail.port=25
+mms.mail.ssl=false
+mms.mail.transport=smtp
+
+# security
+mms.https.CAFile=/opt/mongodb/pki/ca.cert
+mms.https.PEMKeyFile=/opt/mongodb/pki/{{ hostname }}.pem
+mms.https.ClientCertificateMode=agent_only
+
+# mongodb binary inventory
+automation.versions.source=remote
+
+# appDB
+mongo.mongoUri={{ connection_string }}
+mongo.encryptedCredentials=false
+mongo.ssl=true
+mongodb.ssl.CAFile=/opt/mongodb/pki/ca.cert
+mongodb.ssl.PEMKeyFile=/opt/mongodb/pki/{{ hostname }}.pem
